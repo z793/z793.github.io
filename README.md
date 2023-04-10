@@ -3,7 +3,7 @@
 
 Hello, I'm [Zhou Wei](https://z793.github.io/), A Full-stack development:
 
-- 👨‍💼 I currently work in Shenzhen,China.
+- 👨‍💼 I currently work in Beijing,China.
 - 🏴󠁧󠁢󠁥󠁮󠁧󠁿 I currently learn English.
 - 📺 I currently continue to make some [videos](None) about learning programming. 
 - 👯 I look for cooperation opportunities on [Upwork](None).
