@@ -1,7 +1,7 @@
 网站地址： https://z793.github.io/
 ### Hi there 👋
 
-Hello, I'm [Fusion Zhu](https://z793.github.io/), A Full-stack development:
+Hello, I'm [Zhou Wei](https://z793.github.io/), A Full-stack development:
 
 - 👨‍💼 I currently work in Shenzhen,China.
 - 🏴󠁧󠁢󠁥󠁮󠁧󠁿 I currently learn English.
