@@ -1,0 +1,945 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>坦克大战</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: radial-gradient(circle at 50% 30%, #2a2a35, #101014 70%);
+    font-family: "Courier New", Consolas, monospace;
+    color: #eee;
+    overflow: hidden;
+  }
+  #game {
+    display: flex;
+    gap: 14px;
+    padding: 14px;
+    background: #1c1c24;
+    border: 2px solid #3a3a4a;
+    border-radius: 14px;
+    box-shadow: 0 24px 70px rgba(0,0,0,.8), inset 0 1px 0 rgba(255,255,255,.06);
+  }
+  canvas {
+    display: block;
+    background: #0a0a0e;
+    border-radius: 6px;
+    box-shadow: inset 0 0 40px rgba(0,0,0,.9);
+    max-width: 100%;
+    height: auto;
+  }
+  #hud {
+    width: 132px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .panel {
+    background: #26262f;
+    border: 1px solid #3a3a4a;
+    border-radius: 8px;
+    padding: 8px 10px;
+  }
+  .label {
+    font-size: 10px;
+    letter-spacing: 2px;
+    color: #7a7a90;
+    margin-bottom: 3px;
+  }
+  .value {
+    font-size: 22px;
+    font-weight: bold;
+    color: #e8c33a;
+    text-shadow: 0 0 10px rgba(232,195,58,.4);
+  }
+  .value.small { font-size: 17px; }
+  .tips {
+    font-size: 11px;
+    line-height: 1.8;
+    color: #8a8aa0;
+    background: #26262f;
+    border: 1px solid #3a3a4a;
+    border-radius: 8px;
+    padding: 8px 10px;
+    margin-top: auto;
+  }
+  .tips b { color: #c8c8dd; font-weight: normal; }
+  @media (max-width: 640px) {
+    #game { flex-direction: column; padding: 8px; gap: 8px; }
+    #hud { width: 100%; flex-direction: row; flex-wrap: wrap; }
+    .panel { flex: 1; min-width: 70px; }
+    .tips { display: none; }
+  }
+</style>
+</head>
+<body>
+<div id="game">
+  <canvas id="cv"></canvas>
+  <aside id="hud">
+    <div class="panel">
+      <div class="label">分数</div>
+      <div class="value" id="ui-score">0</div>
+    </div>
+    <div class="panel">
+      <div class="label">生命</div>
+      <div class="value" id="ui-lives">3</div>
+    </div>
+    <div class="panel">
+      <div class="label">关卡</div>
+      <div class="value small" id="ui-level">1</div>
+    </div>
+    <div class="panel">
+      <div class="label">剩余敌人</div>
+      <div class="value small" id="ui-enemy">0</div>
+    </div>
+    <div class="tips">
+      <b>↑↓←→ / WASD</b> 移动<br>
+      <b>空格 / J</b> 开炮<br>
+      <b>P</b> 暂停<br>
+      <b>Enter</b> 开始 / 重来
+    </div>
+  </aside>
+</div>
+
+<script>
+(() => {
+'use strict';
+
+/* ===================== 常量 ===================== */
+const TILE = 40, COLS = 13, ROWS = 13;
+const W = COLS * TILE, H = ROWS * TILE;
+
+const EMPTY = 0, BRICK = 1, STEEL = 2, WATER = 3, GRASS = 4, BASE = 5;
+const DX = [0, 1, 0, -1];   // 0上 1右 2下 3左
+const DY = [-1, 0, 1, 0];
+
+const ENEMY_SPAWNS = [[0, 0], [0, 6], [0, 12]];
+const PLAYER_SPAWNS = [[12, 4], [12, 8]];
+const BASE_R = 12, BASE_C = 6;
+const MAX_LEVEL = 5;
+
+/* ===================== 状态 ===================== */
+const canvas = document.getElementById('cv');
+const ctx = canvas.getContext('2d');
+canvas.width = W;
+canvas.height = H;
+
+let map = [];
+let player = null;
+let enemies = [];
+let bullets = [];
+let effects = [];
+const keys = {};
+
+let score = 0, lives = 3, level = 1;
+let enemiesLeft = 0;
+let state = 'ready';        // ready | playing | paused | over | win
+let baseAlive = true;
+let spawnTimer = 0;
+let respawnTimer = 0;
+let time = 0;
+
+const uiScore = document.getElementById('ui-score');
+const uiLives = document.getElementById('ui-lives');
+const uiLevel = document.getElementById('ui-level');
+const uiEnemy = document.getElementById('ui-enemy');
+
+/* ===================== 工具函数 ===================== */
+function rectsOverlap(x1, y1, w1, h1, x2, y2, w2, h2) {
+  return x1 < x2 + w2 && x1 + w1 > x2 && y1 < y2 + h2 && y1 + h1 > y2;
+}
+
+function shade(hex, amt) {
+  let r = parseInt(hex.slice(1, 3), 16);
+  let g = parseInt(hex.slice(3, 5), 16);
+  let b = parseInt(hex.slice(5, 7), 16);
+  const f = v => Math.max(0, Math.min(255, Math.round(v + amt * 255)));
+  return `rgb(${f(r)},${f(g)},${f(b)})`;
+}
+
+/* ===================== 地图 ===================== */
+function clearArea(r1, c1, r2, c2) {
+  for (let r = r1; r <= r2; r++)
+    for (let c = c1; c <= c2; c++)
+      if (r >= 0 && r < ROWS && c >= 0 && c < COLS) map[r][c] = EMPTY;
+}
+
+function genMap() {
+  map = [];
+  for (let r = 0; r < ROWS; r++) map.push(new Array(COLS).fill(EMPTY));
+
+  const density = Math.min(0.30, 0.20 + level * 0.02);
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const v = Math.random();
+      if (v < density) map[r][c] = BRICK;
+      else if (v < density + 0.05) map[r][c] = STEEL;
+      else if (v < density + 0.09) map[r][c] = WATER;
+      else if (v < density + 0.16) map[r][c] = GRASS;
+    }
+  }
+
+  // 清空出生区
+  clearArea(0, 0, 1, 2);
+  clearArea(0, 5, 1, 7);
+  clearArea(0, 10, 1, 12);
+  clearArea(11, 3, 12, 9);
+
+  // 基地及护墙
+  map[BASE_R][BASE_C] = BASE;
+  map[11][5] = BRICK; map[11][6] = BRICK; map[11][7] = BRICK;
+  map[12][5] = BRICK; map[12][7] = BRICK;
+}
+
+function hitsMap(x, y, w, h) {
+  const c1 = Math.floor(x / TILE), c2 = Math.floor((x + w - 1) / TILE);
+  const r1 = Math.floor(y / TILE), r2 = Math.floor((y + h - 1) / TILE);
+  for (let r = r1; r <= r2; r++) {
+    for (let c = c1; c <= c2; c++) {
+      if (r < 0 || r >= ROWS || c < 0 || c >= COLS) return true;
+      const t = map[r][c];
+      if (t === BRICK || t === STEEL || t === WATER || t === BASE) return true;
+    }
+  }
+  return false;
+}
+
+/* ===================== 坦克 ===================== */
+function allTanks() {
+  const list = [];
+  if (player && !player.dead) list.push(player);
+  for (const e of enemies) if (!e.dead) list.push(e);
+  return list;
+}
+
+function tankOverlapAt(t, x, y) {
+  const list = allTanks();
+  for (const o of list) {
+    if (o === t) continue;
+    if (rectsOverlap(x, y, t.size, t.size, o.x, o.y, o.size, o.size)) return true;
+  }
+  return false;
+}
+
+function changeDir(t, dir) {
+  if (t.dir === dir) return;
+  const ox = t.x, oy = t.y;
+  t.dir = dir;
+  if (dir === 0 || dir === 2) {
+    t.x = Math.round(t.x / TILE) * TILE;
+    t.x = Math.max(0, Math.min(W - t.size, t.x));
+  } else {
+    t.y = Math.round(t.y / TILE) * TILE;
+    t.y = Math.max(0, Math.min(H - t.size, t.y));
+  }
+  if (hitsMap(t.x, t.y, t.size, t.size) || tankOverlapAt(t, t.x, t.y)) {
+    t.x = ox; t.y = oy;
+  }
+}
+
+function moveTank(t, dt) {
+  const dist = t.speed * dt;
+  const nx = t.x + DX[t.dir] * dist;
+  const ny = t.y + DY[t.dir] * dist;
+
+  if (nx < 0 || ny < 0 || nx + t.size > W || ny + t.size > H) return false;
+  if (hitsMap(nx, ny, t.size, t.size)) return false;
+  if (tankOverlapAt(t, nx, ny)) return false;
+
+  t.x = nx; t.y = ny;
+  return true;
+}
+
+function spawnPlayer() {
+  let spot = PLAYER_SPAWNS[0];
+  for (const s of PLAYER_SPAWNS) {
+    const px = s[1] * TILE, py = s[0] * TILE;
+    if (!hitsMap(px, py, TILE, TILE) && !tankOverlapAt({ size: TILE }, px, py)) {
+      spot = s; break;
+    }
+  }
+  player = {
+    x: spot[1] * TILE, y: spot[0] * TILE, size: TILE,
+    dir: 0, speed: 132, isPlayer: true,
+    fireCd: 0, dead: false, invincible: 2.5,
+    color: '#e8c33a'
+  };
+}
+
+function spawnEnemy() {
+  const avail = ENEMY_SPAWNS.filter(([r, c]) => {
+    const x = c * TILE, y = r * TILE;
+    return !tankOverlapAt({ size: TILE }, x, y);
+  });
+  if (!avail.length) return;
+
+  const [r, c] = avail[Math.floor(Math.random() * avail.length)];
+  const colors = ['#c0392b', '#27ae60', '#8e44ad', '#2980b9'];
+  enemies.push({
+    x: c * TILE, y: r * TILE, size: TILE, dir: 2,
+    speed: 58 + level * 7,
+    isPlayer: false,
+    color: colors[Math.floor(Math.random() * colors.length)],
+    fireCd: 0.8 + Math.random() * 1.2,
+    think: 0,
+    spawnTimer: 0.9
+  });
+  enemiesLeft--;
+}
+
+/* ===================== 子弹 ===================== */
+function fire(t) {
+  if (t.isPlayer) {
+    let cnt = 0;
+    for (const b of bullets) if (b.owner === 'player') cnt++;
+    if (cnt >= 2) return;
+  }
+  const cx = t.x + t.size / 2;
+  const cy = t.y + t.size / 2;
+  const off = t.size / 2 + 3;
+  bullets.push({
+    x: cx + DX[t.dir] * off - 4,
+    y: cy + DY[t.dir] * off - 4,
+    w: 8, h: 8,
+    dir: t.dir,
+    speed: t.isPlayer ? 400 : 250,
+    owner: t.isPlayer ? 'player' : 'enemy',
+    dead: false
+  });
+  effects.push({
+    x: cx + DX[t.dir] * off, y: cy + DY[t.dir] * off,
+    t: 0, dur: 0.12, size: 18
+  });
+}
+
+function bulletHitMap(b) {
+  const c1 = Math.floor(b.x / TILE), c2 = Math.floor((b.x + b.w - 1) / TILE);
+  const r1 = Math.floor(b.y / TILE), r2 = Math.floor((b.y + b.h - 1) / TILE);
+  let hit = false;
+  for (let r = r1; r <= r2; r++) {
+    for (let c = c1; c <= c2; c++) {
+      if (r < 0 || r >= ROWS || c < 0 || c >= COLS) continue;
+      const t = map[r][c];
+      if (t === BRICK) {
+        map[r][c] = EMPTY;
+        hit = true;
+      } else if (t === STEEL) {
+        hit = true;
+      } else if (t === BASE) {
+        hit = true;
+        destroyBase();
+      }
+    }
+  }
+  return hit;
+}
+
+function destroyBase() {
+  if (!baseAlive) return;
+  baseAlive = false;
+  addExplosion(BASE_C * TILE + TILE / 2, BASE_R * TILE + TILE / 2, 70);
+  state = 'over';
+}
+
+/* ===================== 特效 ===================== */
+function addExplosion(x, y, size) {
+  effects.push({ x, y, t: 0, dur: 0.38, size });
+}
+
+/* ===================== 更新逻辑 ===================== */
+function updatePlayer(dt) {
+  const p = player;
+  if (!p || p.dead) return;
+
+  p.fireCd -= dt;
+  if (p.invincible > 0) p.invincible -= dt;
+
+  let dir = -1;
+  if (keys['ArrowUp'] || keys['w']) dir = 0;
+  else if (keys['ArrowRight'] || keys['d']) dir = 1;
+  else if (keys['ArrowDown'] || keys['s']) dir = 2;
+  else if (keys['ArrowLeft'] || keys['a']) dir = 3;
+
+  if (dir >= 0) {
+    if (p.dir !== dir) changeDir(p, dir);
+    moveTank(p, dt);
+  }
+
+  if ((keys[' '] || keys['j']) && p.fireCd <= 0) {
+    fire(p);
+    p.fireCd = 0.26;
+  }
+}
+
+function chooseEnemyDir(e) {
+  if (player && !player.dead && Math.random() < 0.35) {
+    const dx = (player.x + player.size / 2) - (e.x + e.size / 2);
+    const dy = (player.y + player.size / 2) - (e.y + e.size / 2);
+    if (Math.abs(dx) > Math.abs(dy)) changeDir(e, dx > 0 ? 1 : 3);
+    else changeDir(e, dy > 0 ? 2 : 0);
+  } else {
+    changeDir(e, Math.floor(Math.random() * 4));
+  }
+}
+
+function updateEnemies(dt) {
+  for (const e of enemies) {
+    if (e.dead) continue;
+
+    if (e.spawnTimer > 0) {
+      e.spawnTimer -= dt;
+      continue;
+    }
+
+    e.think -= dt;
+    e.fireCd -= dt;
+
+    if (e.think <= 0) {
+      e.think = 0.8 + Math.random() * 1.4;
+      chooseEnemyDir(e);
+    }
+
+    if (!moveTank(e, dt)) {
+      chooseEnemyDir(e);
+      e.think = 0.5 + Math.random() * 0.7;
+    }
+
+    if (e.fireCd <= 0) {
+      fire(e);
+      e.fireCd = 1.0 + Math.random() * 1.6;
+    }
+  }
+  enemies = enemies.filter(e => !e.dead);
+}
+
+function updateBullets(dt) {
+  for (const b of bullets) {
+    if (b.dead) continue;
+
+    b.x += DX[b.dir] * b.speed * dt;
+    b.y += DY[b.dir] * b.speed * dt;
+
+    if (b.x < -20 || b.y < -20 || b.x > W + 20 || b.y > H + 20) {
+      b.dead = true;
+      continue;
+    }
+
+    if (bulletHitMap(b)) {
+      b.dead = true;
+      addExplosion(b.x + 4, b.y + 4, 16);
+      continue;
+    }
+
+    if (b.owner === 'player') {
+      for (const e of enemies) {
+        if (e.dead || e.spawnTimer > 0) continue;
+        if (rectsOverlap(b.x, b.y, b.w, b.h, e.x, e.y, e.size, e.size)) {
+          b.dead = true;
+          e.dead = true;
+          addExplosion(e.x + e.size / 2, e.y + e.size / 2, 46);
+          score += 100;
+          break;
+        }
+      }
+    } else {
+      if (player && !player.dead && player.invincible <= 0 &&
+          rectsOverlap(b.x, b.y, b.w, b.h, player.x, player.y, player.size, player.size)) {
+        b.dead = true;
+        killPlayer();
+      }
+    }
+  }
+
+  // 子弹互撞
+  for (let i = 0; i < bullets.length; i++) {
+    if (bullets[i].dead) continue;
+    for (let j = i + 1; j < bullets.length; j++) {
+      if (bullets[j].dead) continue;
+      const a = bullets[i], c = bullets[j];
+      if (a.owner === c.owner) continue;
+      if (rectsOverlap(a.x, a.y, a.w, a.h, c.x, c.y, c.w, c.h)) {
+        a.dead = true;
+        c.dead = true;
+        addExplosion((a.x + c.x) / 2 + 4, (a.y + c.y) / 2 + 4, 20);
+      }
+    }
+  }
+
+  bullets = bullets.filter(b => !b.dead);
+}
+
+function killPlayer() {
+  if (!player || player.dead) return;
+  addExplosion(player.x + TILE / 2, player.y + TILE / 2, 46);
+  player.dead = true;
+  lives--;
+  respawnTimer = 1.1;
+  if (lives < 0) lives = 0;
+}
+
+function updateSpawn(dt) {
+  if (enemiesLeft <= 0) return;
+  const alive = enemies.filter(e => !e.dead).length;
+  if (alive >= 4) return;
+
+  spawnTimer -= dt;
+  if (spawnTimer <= 0) {
+    spawnTimer = 1.4;
+    spawnEnemy();
+  }
+}
+
+function update(dt) {
+  time += dt;
+
+  for (const e of effects) e.t += dt;
+  effects = effects.filter(e => e.t < e.dur);
+
+  if (state !== 'playing') return;
+
+  updatePlayer(dt);
+  updateEnemies(dt);
+  updateBullets(dt);
+  updateSpawn(dt);
+
+  if (player && player.dead) {
+    respawnTimer -= dt;
+    if (respawnTimer <= 0) {
+      if (lives > 0) spawnPlayer();
+      else state = 'over';
+    }
+  }
+
+  if (enemiesLeft <= 0 && enemies.length === 0 && (!player || !player.dead)) {
+    level++;
+    if (level > MAX_LEVEL) {
+      state = 'win';
+    } else {
+      startLevel();
+    }
+  }
+}
+
+/* ===================== 绘制 ===================== */
+function drawBrick(x, y) {
+  ctx.fillStyle = '#6b3212';
+  ctx.fillRect(x, y, TILE, TILE);
+  ctx.fillStyle = '#b25a2a';
+  const bw = TILE / 2, bh = TILE / 4;
+  for (let i = 0; i < 4; i++) {
+    for (let j = 0; j < 2; j++) {
+      let bx = x + j * bw;
+      if (i % 2 === 0) bx += bw / 2;
+      let w = bw - 3;
+      if (bx + w > x + TILE - 1) w = x + TILE - 1 - bx;
+      if (bx < x) { w -= (x - bx); bx = x; }
+      if (w > 0) ctx.fillRect(bx + 1, y + i * bh + 1, w, bh - 3);
+    }
+  }
+}
+
+function drawSteel(x, y) {
+  ctx.fillStyle = '#5b5b6b';
+  ctx.fillRect(x, y, TILE, TILE);
+  ctx.fillStyle = '#9a9aae';
+  ctx.fillRect(x + 3, y + 3, TILE - 6, TILE / 2 - 5);
+  ctx.fillRect(x + 3, y + TILE / 2 + 2, TILE - 6, TILE / 2 - 5);
+  ctx.fillStyle = '#cfcfe2';
+  ctx.fillRect(x + 3, y + 3, TILE - 6, 3);
+  ctx.fillRect(x + 3, y + TILE / 2 + 2, TILE - 6, 3);
+}
+
+function drawWater(x, y, r, c) {
+  const g = ctx.createLinearGradient(x, y, x, y + TILE);
+  g.addColorStop(0, '#1b4f83');
+  g.addColorStop(1, '#0b2545');
+  ctx.fillStyle = g;
+  ctx.fillRect(x, y, TILE, TILE);
+
+  ctx.strokeStyle = 'rgba(130,205,255,.5)';
+  ctx.lineWidth = 2;
+  for (let i = 0; i < 2; i++) {
+    const wy = y + 13 + i * 15;
+    const ph = Math.sin(time * 2.2 + c * 0.9 + i * 1.7) * 5;
+    ctx.beginPath();
+    ctx.moveTo(x + 4 + ph, wy);
+    ctx.quadraticCurveTo(x + TILE / 2, wy - 5, x + TILE - 4 - ph, wy);
+    ctx.stroke();
+  }
+}
+
+function drawGrass(x, y, r, c) {
+  ctx.fillStyle = 'rgba(28,110,38,.72)';
+  ctx.fillRect(x, y, TILE, TILE);
+  ctx.fillStyle = 'rgba(72,180,72,.85)';
+  for (let i = 0; i < 7; i++) {
+    const gx = x + ((i * 13 + r * 17) % 32) + 4;
+    const gy = y + ((i * 21 + c * 11) % 30) + 5;
+    ctx.beginPath();
+    ctx.arc(gx, gy, 4.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function drawBase(x, y) {
+  ctx.fillStyle = '#2e2e38';
+  ctx.fillRect(x + 2, y + 2, TILE - 4, TILE - 4);
+
+  const cx = x + TILE / 2, cy = y + TILE / 2;
+  ctx.save();
+  ctx.translate(cx, cy);
+
+  const col = baseAlive ? '#e8c33a' : '#5a5a66';
+  ctx.fillStyle = col;
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const r = i % 2 === 0 ? 14 : 6;
+    const a = -Math.PI / 2 + i * Math.PI / 5;
+    const px = Math.cos(a) * r, py = Math.sin(a) * r;
+    i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.fill();
+
+  if (baseAlive) {
+    ctx.shadowColor = '#e8c33a';
+    ctx.shadowBlur = 12;
+    ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+  ctx.restore();
+}
+
+function drawTile(r, c) {
+  const t = map[r][c];
+  if (t === EMPTY) return;
+  const x = c * TILE, y = r * TILE;
+
+  switch (t) {
+    case BRICK: drawBrick(x, y); break;
+    case STEEL: drawSteel(x, y); break;
+    case WATER: drawWater(x, y, r, c); break;
+    case BASE:  drawBase(x, y); break;
+  }
+}
+
+function drawTank(t) {
+  const s = t.size;
+  const cx = t.x + s / 2, cy = t.y + s / 2;
+
+  if (t.spawnTimer > 0) {
+    // 出生闪烁
+    const p = 1 - t.spawnTimer / 0.9;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(time * 8);
+    ctx.strokeStyle = `rgba(255,255,255,${0.35 + 0.5 * Math.abs(Math.sin(time * 18))})`;
+    ctx.lineWidth = 3;
+    const r = 6 + p * 14;
+    ctx.beginPath();
+    for (let i = 0; i < 6; i++) {
+      const a = i * Math.PI / 3;
+      const px = Math.cos(a) * r, py = Math.sin(a) * r;
+      i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
+
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(t.dir * Math.PI / 2);
+
+  const dark = shade(t.color, -0.28);
+  const light = shade(t.color, 0.14);
+
+  // 履带
+  ctx.fillStyle = dark;
+  ctx.fillRect(-s / 2 + 1, -s / 2 + 3, 8, s - 6);
+  ctx.fillRect(s / 2 - 9, -s / 2 + 3, 8, s - 6);
+
+  ctx.fillStyle = 'rgba(0,0,0,.4)';
+  for (let i = 0; i < 5; i++) {
+    ctx.fillRect(-s / 2 + 1, -s / 2 + 6 + i * 7, 8, 3);
+    ctx.fillRect(s / 2 - 9, -s / 2 + 6 + i * 7, 8, 3);
+  }
+
+  // 车身
+  ctx.fillStyle = t.color;
+  ctx.fillRect(-s / 2 + 9, -s / 2 + 7, s - 18, s - 14);
+
+  ctx.fillStyle = 'rgba(255,255,255,.18)';
+  ctx.fillRect(-s / 2 + 9, -s / 2 + 7, s - 18, 4);
+
+  // 炮塔
+  ctx.fillStyle = light;
+  ctx.beginPath();
+  ctx.arc(0, 2, 8, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,.45)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  // 炮管
+  ctx.fillStyle = dark;
+  ctx.fillRect(-3, -s / 2 - 4, 6, s / 2 + 6);
+
+  ctx.restore();
+
+  // 无敌护盾
+  if (t.isPlayer && t.invincible > 0) {
+    const a = 0.35 + 0.45 * Math.abs(Math.sin(time * 12));
+    ctx.strokeStyle = `rgba(110,225,255,${a})`;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(cx, cy, s * 0.66, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+}
+
+function drawBullet(b) {
+  const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+  ctx.save();
+  ctx.shadowColor = b.owner === 'player' ? '#ffe066' : '#ff7043';
+  ctx.shadowBlur = 10;
+
+  ctx.fillStyle = b.owner === 'player' ? '#fff3b0' : '#ffb08a';
+  ctx.beginPath();
+  ctx.arc(cx, cy, 4.5, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = b.owner === 'player' ? '#ffd23f' : '#ff5722';
+  ctx.beginPath();
+  ctx.arc(cx, cy, 2.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawEffects() {
+  for (const e of effects) {
+    const p = e.t / e.dur;
+    const r = e.size * (0.35 + p * 0.75);
+    ctx.globalAlpha = 1 - p;
+
+    ctx.fillStyle = '#ff8c00';
+    ctx.beginPath();
+    ctx.arc(e.x, e.y, r * 0.65, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#ffe066';
+    ctx.beginPath();
+    ctx.arc(e.x, e.y, r * 0.35, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.globalAlpha = 1;
+  }
+}
+
+function render() {
+  ctx.fillStyle = '#0a0a0e';
+  ctx.fillRect(0, 0, W, H);
+
+  // 网格微光
+  ctx.strokeStyle = 'rgba(255,255,255,.025)';
+  ctx.lineWidth = 1;
+  for (let i = 1; i < COLS; i++) {
+    ctx.beginPath(); ctx.moveTo(i * TILE, 0); ctx.lineTo(i * TILE, H); ctx.stroke();
+  }
+  for (let i = 1; i < ROWS; i++) {
+    ctx.beginPath(); ctx.moveTo(0, i * TILE); ctx.lineTo(W, i * TILE); ctx.stroke();
+  }
+
+  // 底层地形
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const t = map[r][c];
+      if (t === EMPTY || t === GRASS) continue;
+      drawTile(r, c);
+    }
+  }
+
+  // 坦克
+  if (player && !player.dead) drawTank(player);
+  for (const e of enemies) if (!e.dead) drawTank(e);
+
+  // 子弹
+  for (const b of bullets) drawBullet(b);
+
+  // 草丛（最上层遮挡）
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      if (map[r][c] === GRASS) drawGrass(c * TILE, r * TILE, r, c);
+    }
+  }
+
+  drawEffects();
+  drawOverlay();
+}
+
+function drawOverlay() {
+  if (state === 'playing') return;
+
+  ctx.fillStyle = 'rgba(0,0,0,.72)';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  if (state === 'ready') {
+    ctx.fillStyle = '#e8c33a';
+    ctx.font = 'bold 46px "Courier New", monospace';
+    ctx.shadowColor = '#e8c33a';
+    ctx.shadowBlur = 24;
+    ctx.fillText('坦克大战', W / 2, H / 2 - 80);
+    ctx.shadowBlur = 0;
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 17px "Courier New", monospace';
+    ctx.fillText('按 Enter 开始游戏', W / 2, H / 2 + 10);
+
+    ctx.fillStyle = '#8a8aa0';
+    ctx.font = '13px "Courier New", monospace';
+    ctx.fillText('↑ ↓ ← →  /  W A S D   移动', W / 2, H / 2 + 60);
+    ctx.fillText('空格 / J   开炮', W / 2, H / 2 + 84);
+    ctx.fillText('守住底部的基地！', W / 2, H / 2 + 120);
+  } else if (state === 'paused') {
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 36px "Courier New", monospace';
+    ctx.fillText('暂停', W / 2, H / 2 - 20);
+    ctx.fillStyle = '#8a8aa0';
+    ctx.font = '15px "Courier New", monospace';
+    ctx.fillText('按 P 继续', W / 2, H / 2 + 30);
+  } else if (state === 'over') {
+    ctx.fillStyle = '#e74c3c';
+    ctx.font = 'bold 44px "Courier New", monospace';
+    ctx.shadowColor = '#e74c3c';
+    ctx.shadowBlur = 20;
+    ctx.fillText('GAME OVER', W / 2, H / 2 - 40);
+    ctx.shadowBlur = 0;
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 20px "Courier New", monospace';
+    ctx.fillText('得分  ' + score, W / 2, H / 2 + 30);
+
+    ctx.fillStyle = '#8a8aa0';
+    ctx.font = '14px "Courier New", monospace';
+    ctx.fillText('按 Enter 重新开始', W / 2, H / 2 + 80);
+  } else if (state === 'win') {
+    ctx.fillStyle = '#2ecc71';
+    ctx.font = 'bold 40px "Courier New", monospace';
+    ctx.shadowColor = '#2ecc71';
+    ctx.shadowBlur = 22;
+    ctx.fillText('胜利！', W / 2, H / 2 - 50);
+    ctx.shadowBlur = 0;
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 20px "Courier New", monospace';
+    ctx.fillText('最终得分  ' + score, W / 2, H / 2 + 20);
+
+    ctx.fillStyle = '#8a8aa0';
+    ctx.font = '14px "Courier New", monospace';
+    ctx.fillText('按 Enter 再玩一次', W / 2, H / 2 + 70);
+  }
+}
+
+/* ===================== HUD ===================== */
+function updateHUD() {
+  uiScore.textContent = score;
+  uiLives.textContent = lives;
+  uiLevel.textContent = level + ' / ' + MAX_LEVEL;
+  uiEnemy.textContent = enemiesLeft + enemies.length;
+}
+
+/* ===================== 流程控制 ===================== */
+function startLevel() {
+  genMap();
+  player = null;
+  enemies = [];
+  bullets = [];
+  effects = [];
+  baseAlive = true;
+  enemiesLeft = 6 + level * 2;
+  spawnTimer = 0.6;
+  respawnTimer = 0;
+  spawnPlayer();
+  state = 'playing';
+  updateHUD();
+}
+
+function startGame() {
+  score = 0;
+  lives = 3;
+  level = 1;
+  startLevel();
+}
+
+/* ===================== 输入 ===================== */
+window.addEventListener('keydown', e => {
+  const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+
+  if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' '].includes(e.key)) {
+    e.preventDefault();
+  }
+
+  keys[k] = true;
+
+  if (k === 'Enter') {
+    if (state === 'ready' || state === 'over' || state === 'win') {
+      startGame();
+    }
+  }
+  if (k === 'p') {
+    if (state === 'playing') state = 'paused';
+    else if (state === 'paused') state = 'playing';
+  }
+});
+
+window.addEventListener('keyup', e => {
+  const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+  keys[k] = false;
+});
+
+window.addEventListener('blur', () => {
+  if (state === 'playing') state = 'paused';
+});
+
+/* ===================== 主循环 ===================== */
+const STEP = 1 / 60;
+let lastTime = 0;
+let acc = 0;
+
+function loop(ts) {
+  if (!lastTime) lastTime = ts;
+  let dt = (ts - lastTime) / 1000;
+  lastTime = ts;
+  if (dt > 0.25) dt = 0.25;
+
+  acc += dt;
+  let guard = 0;
+  while (acc >= STEP && guard++ < 8) {
+    update(STEP);
+    acc -= STEP;
+  }
+
+  render();
+  updateHUD();
+  requestAnimationFrame(loop);
+}
+
+/* ===================== 启动 ===================== */
+genMap();
+spawnPlayer();
+state = 'ready';
+requestAnimationFrame(loop);
+
+})();
+</script>
+</body>
+</html>
